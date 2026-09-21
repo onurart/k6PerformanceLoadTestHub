@@ -15,7 +15,8 @@ function numberInRange(name, fallback, min, max) {
   return value;
 }
 
-const TARGET_URL = env.TARGET_URL || 'games.hubgmng.com';
+const TARGET_URL = env.TARGET_URL || 'https://games.hubgmng.com';
+const ALLOWED_HOST = env.ALLOWED_HOST || 'games.hubgmng.com';
 const SCENARIO = env.SCENARIO || 'smoke';
 const REGION = env.REGION_TAG || 'local';
 const MACHINE_COUNT = positiveInt('MACHINE_COUNT', 1);
@@ -24,18 +25,23 @@ const GLOBAL_MAX_RPS = positiveInt('MAX_RPS', 5);
 const GLOBAL_MAX_VUS = positiveInt('MAX_VUS', 5);
 const TEST_DURATION = env.TEST_DURATION || '1m';
 const WARMUP_DURATION = env.WARMUP_DURATION || '15s';
+const TOTAL_DURATION = env.TOTAL_DURATION || '2h';
+const TOTAL_REQUESTS = positiveInt('TOTAL_REQUESTS', 50000);
 const P95_LIMIT_MS = positiveInt('P95_LIMIT_MS', 1500);
 const ERROR_RATE_LIMIT = numberInRange('ERROR_RATE_LIMIT', 0.02, 0.0001, 1);
 const REQUEST_TIMEOUT = env.REQUEST_TIMEOUT || '10s';
 const LOG_EACH_REQUEST = env.LOG_EACH_REQUEST !== 'false';
 
-if (!['smoke', 'load', 'stress', 'spike'].includes(SCENARIO)) throw new Error('SCENARIO: smoke, load, stress veya spike olmalıdır');
+if (!['smoke', 'load', 'stress', 'spike', 'volume'].includes(SCENARIO)) throw new Error('SCENARIO: smoke, load, stress, spike veya volume olmalıdır');
 if (!Number.isInteger(MACHINE_INDEX) || MACHINE_INDEX < 0 || MACHINE_INDEX >= MACHINE_COUNT) throw new Error('MACHINE_INDEX sıfır tabanlı olmalı ve MACHINE_COUNT değerinden küçük olmalıdır');
 if (MACHINE_COUNT > GLOBAL_MAX_RPS || MACHINE_COUNT > GLOBAL_MAX_VUS) throw new Error('MACHINE_COUNT, MAX_RPS ve MAX_VUS değerlerini aşamaz');
 
 // k6 çalışma zamanı tarayıcıdaki URL globalini sağlamaz; origin'i dar bir desenle doğrula.
 const targetMatch = TARGET_URL.match(/^(https?):\/\/([^\/?#]+)$/);
-if (!targetMatch || targetMatch[2].includes('@')) throw new Error('TARGET_URL yalnızca origin içermelidir (ör. games.hubgmng.com)');
+if (!targetMatch || targetMatch[2].includes('@')) throw new Error('TARGET_URL yalnızca origin içermelidir (ör. https://games.hubgmng.com)');
+if (targetMatch[2].toLowerCase() !== ALLOWED_HOST.toLowerCase()) {
+  throw new Error(`Güvenlik kilidi: TARGET_URL hostu (${targetMatch[2]}) ALLOWED_HOST (${ALLOWED_HOST}) ile aynı olmalıdır`);
+}
 const target = { origin: TARGET_URL };
 
 function parseEndpoints() {
@@ -74,6 +80,10 @@ function rate(pct) { return Math.max(1, Math.min(LOCAL_MAX_RPS, Math.ceil(LOCAL_
 
 function scenarioConfig() {
   const common = { executor: 'ramping-arrival-rate', timeUnit: '1s', preAllocatedVUs, maxVUs: LOCAL_MAX_VUS, gracefulStop: '5s' };
+  if (SCENARIO === 'volume') return {
+    executor: 'constant-arrival-rate', rate: shard(TOTAL_REQUESTS), timeUnit: TOTAL_DURATION,
+    duration: TOTAL_DURATION, preAllocatedVUs, maxVUs: LOCAL_MAX_VUS, gracefulStop: '5s',
+  };
   if (SCENARIO === 'smoke') return { ...common, startRate: 1, stages: [{ target: 1, duration: WARMUP_DURATION }, { target: 1, duration: TEST_DURATION }] };
   if (SCENARIO === 'load') return { ...common, startRate: 1, stages: [
     { target: rate(.5), duration: WARMUP_DURATION }, { target: LOCAL_MAX_RPS, duration: TEST_DURATION }, { target: rate(.25), duration: '10s' },
@@ -97,6 +107,20 @@ const status2xx = new Counter('status_2xx');
 const status3xx = new Counter('status_3xx');
 const status4xx = new Counter('status_4xx');
 const status5xx = new Counter('status_5xx');
+const TRACKED_STATUS_CODES = [0, 200, 201, 204, 301, 302, 304, 400, 401, 403, 404, 409, 422, 429, 500, 502, 503, 504];
+const endpointMetrics = {};
+for (const endpoint of ENDPOINTS) {
+  const metricName = endpoint.name.toLowerCase().replace(/[^a-z0-9_]/g, '_');
+  const statuses = {};
+  for (const code of TRACKED_STATUS_CODES) statuses[code] = new Counter(`endpoint_${metricName}_status_${code}`);
+  endpointMetrics[endpoint.name] = {
+    metricName,
+    total: new Counter(`endpoint_${metricName}_total`),
+    failed: new Counter(`endpoint_${metricName}_failed`),
+    other: new Counter(`endpoint_${metricName}_status_other`),
+    statuses,
+  };
+}
 
 export const options = {
   scenarios: { [SCENARIO]: scenarioConfig() },
@@ -113,7 +137,9 @@ export const options = {
 export function setup() {
   console.log(JSON.stringify({ event: 'test_config', target: target.origin, scenario: SCENARIO, region: REGION,
     machine: `${MACHINE_INDEX + 1}/${MACHINE_COUNT}`, local_max_rps: LOCAL_MAX_RPS, local_max_vus: LOCAL_MAX_VUS,
-    global_max_rps: GLOBAL_MAX_RPS, global_max_vus: GLOBAL_MAX_VUS }));
+    global_max_rps: GLOBAL_MAX_RPS, global_max_vus: GLOBAL_MAX_VUS,
+    total_requests: SCENARIO === 'volume' ? TOTAL_REQUESTS : null,
+    total_duration: SCENARIO === 'volume' ? TOTAL_DURATION : null }));
 }
 
 export default function () {
@@ -129,9 +155,14 @@ export default function () {
   check(response, { 'beklenen HTTP durumu': () => statusOK, 'beklenen yanıt içeriği': () => bodyOK }, tags);
   const timedOut = response.error_code === 1050 || String(response.error || '').toLowerCase().includes('timeout');
   const requestOK = statusOK && bodyOK && !timedOut;
+  const endpointMetric = endpointMetrics[endpoint.name];
   failedRequests.add(!statusOK || !bodyOK || timedOut, tags);
   responseDuration.add(response.timings.duration, tags);
   statusCodes.add(1, { ...tags, status: String(response.status || 0) });
+  endpointMetric.total.add(1);
+  if (!requestOK) endpointMetric.failed.add(1);
+  if (endpointMetric.statuses[response.status]) endpointMetric.statuses[response.status].add(1);
+  else endpointMetric.other.add(1, { status: String(response.status || 0) });
   if (response.status >= 200 && response.status < 300) status2xx.add(1, tags);
   else if (response.status >= 300 && response.status < 400) status3xx.add(1, tags);
   else if (response.status >= 400 && response.status < 500) status4xx.add(1, tags);
@@ -159,6 +190,21 @@ export function handleSummary(data) {
   const requests = values('http_reqs');
   const failures = values('failed_requests');
   const line = (label, value) => `${label.padEnd(24)} ${value === undefined ? 0 : value}`;
+  const endpointReport = ['', '=== Endpoint durum kodları ==='];
+  for (const endpoint of ENDPOINTS) {
+    const metric = endpointMetrics[endpoint.name];
+    const statusParts = [];
+    for (const code of TRACKED_STATUS_CODES) {
+      const count = values(`endpoint_${metric.metricName}_status_${code}`).count || 0;
+      if (count > 0) statusParts.push(`${code}=${count}`);
+    }
+    const other = values(`endpoint_${metric.metricName}_status_other`).count || 0;
+    if (other > 0) statusParts.push(`diğer=${other}`);
+    const total = values(`endpoint_${metric.metricName}_total`).count || 0;
+    const failed = values(`endpoint_${metric.metricName}_failed`).count || 0;
+    endpointReport.push(`${endpoint.name} (${endpoint.method} ${endpoint.url.slice(target.origin.length)})`);
+    endpointReport.push(`  toplam=${total} başarısız=${failed} | ${statusParts.join(' ') || 'yanıt yok'}`);
+  }
   const report = [
     '', '=== k6 kapasite testi özeti ===',
     line('Hedef', target.origin), line('Senaryo / Bölge', `${SCENARIO} / ${REGION}`),
@@ -171,7 +217,8 @@ export function handleSummary(data) {
     line('HTTP 2xx', values('status_2xx').count), line('HTTP 3xx', values('status_3xx').count),
     line('HTTP 4xx', values('status_4xx').count), line('HTTP 5xx', values('status_5xx').count),
     line('Timeout', values('timeouts').count), line('İçerik hatası', values('content_failures').count),
-    line('Atlanan iterasyon', values('dropped_iterations').count), '',
+    line('Atlanan iterasyon', values('dropped_iterations').count),
+    ...endpointReport, '',
   ].join('\n');
   const result = { stdout: report };
   if (env.SAVE_JSON_RESULTS === 'true') result[`results/summary-${REGION}-${MACHINE_INDEX}.json`] = JSON.stringify(output, null, 2);

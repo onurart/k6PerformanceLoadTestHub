@@ -25,14 +25,16 @@ Bu paket HTTP tabanlı k6 kullanır; gerçek tarayıcı çalıştırmaz. Betik k
 | Değişken            |       Varsayılan | Anlamı                                   |
 | --------------------- | ----------------: | ----------------------------------------- |
 | `TARGET_URL`          | `https://url.com` | Yalnızca hedef origin                    |
+| `ALLOWED_HOST`        | `games.hubgmng.com` | Yanlış domaine trafik gönderilmesini engelleyen host kilidi |
 | `ENDPOINTS_JSON`      |     ana sayfa GET | Endpoint, yöntem, beklenen kod/içerik   |
-| `SCENARIO`            |           `smoke` | `smoke/load/stress/spike`                 |
+| `SCENARIO`            |           `smoke` | `smoke/load/stress/spike/volume`          |
 | `MAX_RPS` / `MAX_VUS` |             5 / 5 | Bütün makinelerin toplam üst sınırı |
 | `TEST_DURATION`       |              `1m` | Senaryo basamağı/sabit yük süresi     |
 | `WARMUP_DURATION`     |             `15s` | Eşik değerlendirmesinden önce ısınma |
 | `P95_LIMIT_MS`        |              1500 | Otomatik durdurma p95 sınırı           |
 | `ERROR_RATE_LIMIT`    |              0.02 | Otomatik durdurma hata oranı             |
 | `REQUEST_TIMEOUT`     |             `10s` | İstek timeout'u                          |
+| `TOTAL_REQUESTS` / `TOTAL_DURATION` | 50000 / 2h | `volume` için toplam iterasyon ve süre |
 
 Endpoint örneği:
 
