@@ -1,7 +1,0 @@
-log/
-results/
-summary-*.json
-distributed-summary.json
-__pycache__/
-*.py[cod]
-.DS_Store
