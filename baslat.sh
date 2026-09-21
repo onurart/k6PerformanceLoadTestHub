@@ -26,4 +26,6 @@ if [[ -n "${COORDINATOR_URL:-}" ]]; then
   exec python3 distributed/runner.py --coordinator "$COORDINATOR_URL" --json "$json_file" --console "$console_file"
 fi
 echo "k6 testi başlıyor. Ekran ve log çıktısı: $console_file"
-k6 run k6_test.js 2>&1 | tee "$console_file"
+# k6 foreground'da kalır. Böylece Ctrl+C yalnız k6'ya düzgün kapanma fırsatı
+# verir; process-substitution içindeki tee kapanış özetini loga yazmaya devam eder.
+k6 run k6_test.js > >(tee "$console_file") 2>&1
